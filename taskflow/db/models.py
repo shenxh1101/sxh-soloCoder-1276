@@ -29,6 +29,7 @@ class Task:
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     sort_order: int = 0
+    recurrence_rule: Optional[str] = None
 
 
 @dataclass

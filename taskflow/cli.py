@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -118,12 +119,33 @@ def tui(ctx: typer.Context) -> None:
 
 
 @app.command()
-def add(text: str) -> None:
+def add(
+    text: str,
+    recur: Optional[str] = typer.Option(None, "--recur", help="Recurrence rule: daily, mon/tue/wed/thu/fri/sat/sun, or day number (1-31) for monthly"),
+) -> None:
     config = load_config()
     db = Database(get_db_path())
     db.init_db()
 
     result = parse_natural_task(text)
+
+    if recur:
+        recur_lower = recur.lower()
+        weekday_map = {
+            "mon": 0, "tue": 1, "wed": 2, "thu": 3,
+            "fri": 4, "sat": 5, "sun": 6,
+        }
+        if recur_lower == "daily":
+            result.recurrence_rule = "daily"
+        elif recur_lower in weekday_map:
+            result.recurrence_rule = f"weekly:{weekday_map[recur_lower]}"
+        else:
+            try:
+                day = int(recur_lower)
+                if 1 <= day <= 31:
+                    result.recurrence_rule = f"monthly:{day}"
+            except ValueError:
+                pass
 
     project_id: Optional[int] = None
     if result.project:
@@ -145,6 +167,7 @@ def add(text: str) -> None:
         due_time=result.due_time.isoformat() if result.due_time else None,
         reminder_minutes_before=reminder_minutes_before,
         sort_order=sort_order,
+        recurrence_rule=result.recurrence_rule,
     )
     task_id = db.create_task(task)
 
@@ -176,6 +199,8 @@ def add(text: str) -> None:
         table.add_row("Due Date", result.due_date.isoformat())
     if result.due_time:
         table.add_row("Due Time", result.due_time.isoformat()[:5])
+    if result.recurrence_rule:
+        table.add_row("Recurrence", result.recurrence_rule)
     if result.tags:
         table.add_row("Tags", ", ".join(result.tags))
     console.print(table)
@@ -198,11 +223,19 @@ def complete(task_id: int) -> None:
 
     console.print(f"[green]Task {task_id} marked as complete:[/green] {task.title}")
 
+    new_id = db.generate_next_recurring(task_id)
+    if new_id is not None:
+        console.print(f"[cyan]Next recurring occurrence created: task #{new_id}[/cyan]")
+
 
 @app.command()
 def list(
     status: Optional[str] = None,
     project: Optional[str] = None,
+    today: bool = typer.Option(False, "--today", help="Show tasks due today"),
+    this_week: bool = typer.Option(False, "--this-week", help="Show tasks due this week (Mon-Sun)"),
+    overdue: bool = typer.Option(False, "--overdue", help="Show overdue tasks"),
+    priority: Optional[str] = typer.Option(None, "--priority", help="Filter by priority: urgent_important|not_urgent_important|urgent_not_important|not_urgent_not_important"),
 ) -> None:
     config = load_config()
     db = Database(get_db_path())
@@ -219,6 +252,25 @@ def list(
             console.print(f"[red]Project '{project}' not found[/red]")
             raise typer.Exit(1)
         tasks = [t for t in tasks if t.project_id == proj.id]
+
+    today_date = date.today()
+    week_start = today_date - timedelta(days=today_date.weekday())
+    week_end = week_start + timedelta(days=6)
+    today_iso = today_date.isoformat()
+    week_start_iso = week_start.isoformat()
+    week_end_iso = week_end.isoformat()
+
+    if today:
+        tasks = [t for t in tasks if t.due_date == today_iso]
+
+    if this_week:
+        tasks = [t for t in tasks if t.due_date is not None and week_start_iso <= t.due_date <= week_end_iso]
+
+    if overdue:
+        tasks = [t for t in tasks if t.status != 'done' and t.due_date is not None and t.due_date < today_iso]
+
+    if priority:
+        tasks = [t for t in tasks if t.priority == priority]
 
     table = Table(title="Tasks", show_header=True)
     table.add_column("ID", justify="right")
@@ -291,7 +343,11 @@ def search(query: str) -> None:
 
 
 @app.command()
-def report(week: Optional[str] = None) -> None:
+def report(
+    week: Optional[str] = None,
+    format: str = typer.Option("rich", "--format", "-f", help="rich|markdown|json"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="output file path (auto-named if not provided)"),
+) -> None:
     config = load_config()
     db = Database(get_db_path())
     db.init_db()
@@ -304,8 +360,31 @@ def report(week: Optional[str] = None) -> None:
             console.print(f"[red]Invalid week date: {week}. Use ISO format YYYY-MM-DD[/red]")
             raise typer.Exit(1)
 
+    actual_week_start, actual_week_end = _week_range(week_start)
     weekly_report = WeeklyReport(db)
-    console.print(weekly_report.format_as_rich(week_start))
+
+    if format == "rich":
+        console.print(weekly_report.format_as_rich(week_start))
+    elif format == "markdown":
+        md_content = weekly_report.generate(week_start)
+        if output:
+            filepath = output
+        else:
+            filepath = f"weekly-report-{actual_week_start.isoformat()}-to-{actual_week_end.isoformat()}.md"
+        Path(filepath).write_text(md_content, encoding="utf-8")
+        console.print(f"[green]Report exported to: {filepath}[/green]")
+    elif format == "json":
+        data = weekly_report.to_dict(week_start)
+        json_content = json.dumps(data, indent=2, ensure_ascii=False)
+        if output:
+            filepath = output
+        else:
+            filepath = f"weekly-report-{actual_week_start.isoformat()}-to-{actual_week_end.isoformat()}.json"
+        Path(filepath).write_text(json_content, encoding="utf-8")
+        console.print(f"[green]Report exported to: {filepath}[/green]")
+    else:
+        console.print(f"[red]Unknown format: {format}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -368,42 +447,31 @@ def pomodoro(
         raise typer.Exit(1)
 
     if action == "stats":
-        start, end = _week_range()
-        completed_sessions = db.query_all(
-            "SELECT p.*, t.title AS task_title FROM pomodoro_sessions p "
-            "JOIN tasks t ON p.task_id = t.id "
-            "WHERE p.completed = 1 AND p.started_at >= ? AND p.started_at <= ? "
-            "ORDER BY p.started_at",
-            (start.isoformat(), end.isoformat()),
-        )
-        total_sessions = len(completed_sessions)
-        total_minutes = sum(s.get("duration_minutes", 0) for s in completed_sessions)
+        stats = PomodoroStats(db).get_this_week_stats()
 
         table = Table(title="Pomodoro Stats (This Week)", show_header=True)
         table.add_column("Metric", style="bold")
         table.add_column("Value", justify="right")
-        table.add_row("Completed Sessions", str(total_sessions))
-        table.add_row("Completed Minutes", str(total_minutes))
+        table.add_row("Week Range", f"{stats['week_start']} ~ {stats['week_end']}")
+        table.add_row("Completed Sessions", str(stats["total_sessions"]))
+        table.add_row("Completed Minutes", str(stats["total_minutes"]))
         console.print(table)
 
-        if completed_sessions:
-            by_task: dict[str, dict[str, int]] = {}
-            for s in completed_sessions:
-                tid = str(s["task_id"])
-                title = s.get("task_title", "Unknown")
-                key = f"{tid}: {title}"
-                if key not in by_task:
-                    by_task[key] = {"count": 0, "total_minutes": 0}
-                by_task[key]["count"] += 1
-                by_task[key]["total_minutes"] += s.get("duration_minutes", 0)
-
+        if stats["per_task"]:
             task_table = Table(title="By Task", show_header=True)
             task_table.add_column("Task")
             task_table.add_column("Sessions", justify="right")
             task_table.add_column("Minutes", justify="right")
-            for key, info in by_task.items():
-                task_table.add_row(key, str(info["count"]), str(info["total_minutes"]))
+            for item in stats["per_task"]:
+                task_table.add_row(f"{item['task_id']}: {item['title']}", str(item["sessions"]), str(item["minutes"]))
             console.print(task_table)
+
+        day_table = Table(title="By Day", show_header=True)
+        day_table.add_column("Day", style="bold")
+        day_table.add_column("Minutes", justify="right")
+        for day_name in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]:
+            day_table.add_row(day_name, str(stats["per_day"][day_name]))
+        console.print(day_table)
         return
 
     if action == "start":

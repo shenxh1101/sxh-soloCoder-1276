@@ -16,6 +16,7 @@ class ParseTaskResult:
     priority: Optional[str] = None
     tags: list[str] = field(default_factory=list)
     project: Optional[str] = None
+    recurrence_rule: Optional[str] = None
 
 
 _DAY_OFFSETS: dict[str, timedelta] = {
@@ -105,6 +106,21 @@ _ABSOLUTE_DATE_PATTERN = re.compile(
     r"(\d{1,2})[月/\-.](\d{1,2})[日号]?"
     r")"
 )
+
+_RECURRENCE_WEEKDAY_MAP: dict[str, int] = {
+    "一": 0,
+    "二": 1,
+    "三": 2,
+    "四": 3,
+    "五": 4,
+    "六": 5,
+    "日": 6,
+    "天": 6,
+}
+
+_RECURRENCE_DAILY_PATTERN = re.compile(r"(每天|每日|daily)")
+_RECURRENCE_WEEKLY_PATTERN = re.compile(r"(每星期[一二三四五六日天]|每周[一二三四五六日天])")
+_RECURRENCE_MONTHLY_PATTERN = re.compile(r"每月(\d{1,2})[号日]")
 
 
 def _resolve_weekday(name: str) -> date:
@@ -257,6 +273,36 @@ def extract_project(text: str) -> tuple[Optional[str], str]:
     return project, remaining
 
 
+def extract_recurrence(text: str) -> tuple[Optional[str], str]:
+    remaining = text
+
+    monthly_match = _RECURRENCE_MONTHLY_PATTERN.search(remaining)
+    if monthly_match:
+        day = int(monthly_match.group(1))
+        if 1 <= day <= 31:
+            remaining = remaining[:monthly_match.start()] + remaining[monthly_match.end():]
+            remaining = re.sub(r"\s+", " ", remaining).strip()
+            return f"monthly:{day}", remaining
+
+    weekly_match = _RECURRENCE_WEEKLY_PATTERN.search(remaining)
+    if weekly_match:
+        phrase = weekly_match.group(1)
+        weekday_char = phrase[-1]
+        weekday = _RECURRENCE_WEEKDAY_MAP.get(weekday_char)
+        if weekday is not None:
+            remaining = remaining[:weekly_match.start()] + remaining[weekly_match.end():]
+            remaining = re.sub(r"\s+", " ", remaining).strip()
+            return f"weekly:{weekday}", remaining
+
+    daily_match = _RECURRENCE_DAILY_PATTERN.search(remaining)
+    if daily_match:
+        remaining = remaining[:daily_match.start()] + remaining[daily_match.end():]
+        remaining = re.sub(r"\s+", " ", remaining).strip()
+        return "daily", remaining
+
+    return None, text
+
+
 def parse_natural_task(text: str) -> ParseTaskResult:
     cleaned = text.strip()
     if not cleaned:
@@ -265,6 +311,7 @@ def parse_natural_task(text: str) -> ParseTaskResult:
     tags, cleaned = extract_tags(cleaned)
     project, cleaned = extract_project(cleaned)
     priority, cleaned = extract_priority(cleaned)
+    recurrence_rule, cleaned = extract_recurrence(cleaned)
     due_date, due_time, cleaned = extract_datetime(cleaned)
 
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -274,6 +321,7 @@ def parse_natural_task(text: str) -> ParseTaskResult:
         tags = []
         project = None
         priority = None
+        recurrence_rule = None
         due_date = None
         due_time = None
 
@@ -284,4 +332,5 @@ def parse_natural_task(text: str) -> ParseTaskResult:
         priority=priority,
         tags=tags,
         project=project,
+        recurrence_rule=recurrence_rule,
     )

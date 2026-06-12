@@ -1,0 +1,129 @@
+{
+  "week_start": "2026-06-08",
+  "week_end": "2026-06-14",
+  "summary": {
+    "total_completed": 5,
+    "total_created": 16,
+    "completion_rate": 31.2
+  },
+  "completed": [
+    {
+      "task_id": 11,
+      "title": "周日完成的任务",
+      "project_name": null,
+      "priority": "urgent_important",
+      "pomodoro_hours": 0.8,
+      "completed_at": "2026-06-14T23:45:00"
+    },
+    {
+      "task_id": 2,
+      "title": "Buy milk tomorrow",
+      "project_name": "shopping",
+      "priority": "urgent_not_important",
+      "pomodoro_hours": 0.0,
+      "completed_at": "2026-06-13T06:51:43.453590"
+    },
+    {
+      "task_id": 8,
+      "title": "写周报",
+      "project_name": "工作",
+      "priority": null,
+      "pomodoro_hours": 0.8,
+      "completed_at": "2026-06-13T07:17:33.684112"
+    },
+    {
+      "task_id": 3,
+      "title": "开会准备 PPT",
+      "project_name": "工作",
+      "priority": "urgent_important",
+      "pomodoro_hours": 0.0,
+      "completed_at": "2026-06-13T07:47:28.248895"
+    },
+    {
+      "task_id": 5,
+      "title": "买牛奶",
+      "project_name": "生活",
+      "priority": null,
+      "pomodoro_hours": 0.0,
+      "completed_at": "2026-06-13T06:57:54.630225"
+    }
+  ],
+  "plan": [
+    {
+      "task_id": 13,
+      "title": "开会准备 PPT",
+      "due_date": "2026-06-13",
+      "due_time": "15:00:00",
+      "priority": null
+    },
+    {
+      "task_id": 15,
+      "title": "写周报",
+      "due_date": "2026-06-13",
+      "due_time": null,
+      "priority": null
+    },
+    {
+      "task_id": 6,
+      "title": "开会准备 PPT",
+      "due_date": "2026-06-14",
+      "due_time": "15:00:00",
+      "priority": "urgent_important"
+    },
+    {
+      "task_id": 7,
+      "title": "开会准备 PPT",
+      "due_date": "2026-06-14",
+      "due_time": "15:00:00",
+      "priority": "urgent_important"
+    },
+    {
+      "task_id": 9,
+      "title": "开会准备 PPT",
+      "due_date": "2026-06-14",
+      "due_time": "15:00:00",
+      "priority": "urgent_important"
+    },
+    {
+      "task_id": 10,
+      "title": "开会准备 PPT",
+      "due_date": "2026-06-14",
+      "due_time": "15:00:00",
+      "priority": null
+    },
+    {
+      "task_id": 14,
+      "title": "开会准备 PPT",
+      "due_date": "2026-06-14",
+      "due_time": "15:00:00",
+      "priority": null
+    }
+  ],
+  "pomodoro": [
+    {
+      "title": "写周报",
+      "total_minutes": 50,
+      "hours": 0.8
+    },
+    {
+      "title": "周日完成的任务",
+      "total_minutes": 45,
+      "hours": 0.8
+    }
+  ],
+  "overdue": [
+    {
+      "task_id": 13,
+      "title": "开会准备 PPT",
+      "due_date": "2026-06-13",
+      "due_time": "15:00:00"
+    },
+    {
+      "task_id": 15,
+      "title": "写周报",
+      "due_date": "2026-06-13",
+      "due_time": null
+    }
+  ],
+  "next_week": []
+}

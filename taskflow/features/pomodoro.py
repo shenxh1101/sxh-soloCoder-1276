@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from datetime import date, datetime, timedelta
 from time import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from rich.bar import Bar
 
@@ -120,6 +120,13 @@ class PomodoroStats:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    def _week_range(self, ref_date: Optional[date] = None) -> Tuple[date, date]:
+        if ref_date is None:
+            ref_date = date.today()
+        week_start = ref_date - timedelta(days=ref_date.weekday())
+        week_end = week_start + timedelta(days=6)
+        return week_start, week_end
+
     def get_daily_stats(self, days: int = 7) -> dict[date, int]:
         sessions = self.db.get_pomodoro_sessions()
         stats: dict[date, int] = {}
@@ -166,17 +173,58 @@ class PomodoroStats:
         return hours
 
     def get_weekly_summary(self) -> dict:
-        daily = self.get_daily_stats(days=7)
-        total_minutes = sum(daily.values())
-        avg_per_day = total_minutes / 7
+        week_start, week_end = self._week_range()
+        start_str = week_start.isoformat()
+        end_str = f"{week_end.isoformat()}T23:59:59"
 
-        most_productive_day = max(daily, key=daily.get) if any(daily.values()) else None
+        sessions = self.db.query_all(
+            "SELECT * FROM pomodoro_sessions WHERE completed = 1 AND started_at >= ? AND started_at <= ?",
+            (start_str, end_str),
+        )
+
+        total_minutes = sum(s.get("duration_minutes", 0) for s in sessions)
+
+        per_day: dict[date, int] = {}
+        d = week_start
+        while d <= week_end:
+            per_day[d] = 0
+            d += timedelta(days=1)
+
+        for session in sessions:
+            started_at_str = session.get("started_at")
+            if not started_at_str:
+                continue
+            try:
+                start_dt = datetime.fromisoformat(started_at_str)
+            except (ValueError, TypeError):
+                continue
+            session_date = start_dt.date()
+            if session_date in per_day:
+                per_day[session_date] += session.get("duration_minutes", 0)
+
+        avg_per_day = total_minutes / 7
+        most_productive_day = max(per_day, key=per_day.get) if any(per_day.values()) else None
 
         streak = 0
         today = date.today()
+        all_sessions = self.db.get_pomodoro_sessions()
         for i in range(365):
             d = today - timedelta(days=i)
-            if daily.get(d, 0) > 0 if d in daily else self._has_session_on(d):
+            found = False
+            for session in all_sessions:
+                if session.get("completed", 0) != 1:
+                    continue
+                started_at_str = session.get("started_at")
+                if not started_at_str:
+                    continue
+                try:
+                    start = datetime.fromisoformat(started_at_str)
+                except (ValueError, TypeError):
+                    continue
+                if start.date() == d:
+                    found = True
+                    break
+            if found:
                 streak += 1
             else:
                 if i > 0:
@@ -189,21 +237,58 @@ class PomodoroStats:
             "streak": streak,
         }
 
-    def _has_session_on(self, d: date) -> bool:
-        sessions = self.db.get_pomodoro_sessions()
+    def get_this_week_stats(self) -> dict:
+        week_start, week_end = self._week_range()
+        start_str = week_start.isoformat()
+        end_str = f"{week_end.isoformat()}T23:59:59"
+
+        sessions = self.db.query_all(
+            "SELECT * FROM pomodoro_sessions WHERE completed = 1 AND started_at >= ? AND started_at <= ?",
+            (start_str, end_str),
+        )
+
+        total_sessions = len(sessions)
+        total_minutes = sum(s.get("duration_minutes", 0) for s in sessions)
+
+        per_task_rows = self.db.query_all(
+            "SELECT p.task_id, t.title, COUNT(*) AS sessions, SUM(p.duration_minutes) AS minutes "
+            "FROM pomodoro_sessions p JOIN tasks t ON p.task_id = t.id "
+            "WHERE p.completed = 1 AND p.started_at >= ? AND p.started_at <= ? "
+            "GROUP BY p.task_id ORDER BY minutes DESC",
+            (start_str, end_str),
+        )
+
+        per_task = []
+        for row in per_task_rows:
+            per_task.append({
+                "task_id": row["task_id"],
+                "title": row["title"],
+                "sessions": row["sessions"],
+                "minutes": row["minutes"] or 0,
+            })
+
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        per_day: dict[str, int] = {name: 0 for name in day_names}
+
         for session in sessions:
-            if session.get("completed", 0) != 1:
-                continue
             started_at_str = session.get("started_at")
             if not started_at_str:
                 continue
             try:
-                start = datetime.fromisoformat(started_at_str)
+                start_dt = datetime.fromisoformat(started_at_str)
             except (ValueError, TypeError):
                 continue
-            if start.date() == d:
-                return True
-        return False
+            weekday_idx = start_dt.weekday()
+            per_day[day_names[weekday_idx]] += session.get("duration_minutes", 0)
+
+        return {
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "total_sessions": total_sessions,
+            "total_minutes": total_minutes,
+            "per_task": per_task,
+            "per_day": per_day,
+        }
 
     def format_stats_chart(self, days: int = 7) -> str:
         daily = self.get_daily_stats(days=days)

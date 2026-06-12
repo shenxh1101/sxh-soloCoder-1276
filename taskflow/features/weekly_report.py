@@ -288,3 +288,86 @@ class WeeklyReport:
             elements.append(next_table)
         elements.append(markdown_panel)
         return Group(*elements)
+
+    def to_dict(self, week_start: Optional[date] = None) -> dict:
+        start, end = self._week_range(week_start)
+        completed = self._fetch_completed(start, end)
+        created = self._fetch_created(start, end)
+        pomodoro = self._fetch_pomodoro_summary(start, end)
+        overdue = self._fetch_overdue(end)
+        next_week = self._fetch_next_week(end)
+        this_week_plan = self._fetch_this_week_plan(start, end)
+        total_completed = len(completed)
+        total_created = len(created)
+        completion_rate = (total_completed / total_created * 100) if total_created else 0.0
+
+        task_minutes: dict[int, int] = {}
+        for p in pomodoro:
+            tid = p.get("task_id")
+            if tid is not None:
+                task_minutes[tid] = p.get("total_minutes", 0) or 0
+
+        completed_list: list[dict] = []
+        for row in completed:
+            tid = row.get("id")
+            minutes = task_minutes.get(tid, 0) if tid is not None else 0
+            completed_list.append({
+                "task_id": tid,
+                "title": row.get("title"),
+                "project_name": row.get("project_name"),
+                "priority": row.get("priority"),
+                "pomodoro_hours": round(minutes / 60, 1),
+                "completed_at": row.get("completed_at"),
+            })
+
+        plan_list: list[dict] = []
+        for row in this_week_plan:
+            plan_list.append({
+                "task_id": row.get("id"),
+                "title": row.get("title"),
+                "due_date": row.get("due_date"),
+                "due_time": row.get("due_time"),
+                "priority": row.get("priority"),
+            })
+
+        pomodoro_list: list[dict] = []
+        for row in pomodoro:
+            total_minutes = row.get("total_minutes", 0) or 0
+            pomodoro_list.append({
+                "title": row.get("title"),
+                "total_minutes": total_minutes,
+                "hours": round(total_minutes / 60, 1),
+            })
+
+        overdue_list: list[dict] = []
+        for row in overdue:
+            overdue_list.append({
+                "task_id": row.get("id"),
+                "title": row.get("title"),
+                "due_date": row.get("due_date"),
+                "due_time": row.get("due_time"),
+            })
+
+        next_week_list: list[dict] = []
+        for row in next_week:
+            next_week_list.append({
+                "task_id": row.get("id"),
+                "title": row.get("title"),
+                "due_date": row.get("due_date"),
+                "due_time": row.get("due_time"),
+            })
+
+        return {
+            "week_start": start.isoformat(),
+            "week_end": end.isoformat(),
+            "summary": {
+                "total_completed": total_completed,
+                "total_created": total_created,
+                "completion_rate": round(completion_rate, 1),
+            },
+            "completed": completed_list,
+            "plan": plan_list,
+            "pomodoro": pomodoro_list,
+            "overdue": overdue_list,
+            "next_week": next_week_list,
+        }

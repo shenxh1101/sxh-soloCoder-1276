@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -140,6 +140,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         sort_order=row["sort_order"],
+        recurrence_rule=row["recurrence_rule"] if "recurrence_rule" in row.keys() else None,
     )
 
 
@@ -201,6 +202,81 @@ def _row_to_reminder(row: sqlite3.Row) -> Reminder:
     )
 
 
+def compute_next_occurrence(task: Task) -> Optional[Tuple[date, time]]:
+    if not task.recurrence_rule:
+        return None
+
+    rule = task.recurrence_rule
+    current_due_date: Optional[date] = None
+    current_due_time: Optional[time] = None
+
+    if task.due_date:
+        try:
+            current_due_date = date.fromisoformat(task.due_date)
+        except (ValueError, TypeError):
+            current_due_date = None
+    if task.due_time:
+        try:
+            current_due_time = time.fromisoformat(task.due_time)
+        except (ValueError, TypeError):
+            current_due_time = None
+
+    next_date: Optional[date] = None
+
+    if rule == "daily":
+        if current_due_date:
+            next_date = current_due_date + timedelta(days=1)
+        else:
+            next_date = date.today() + timedelta(days=1)
+    elif rule.startswith("weekly:"):
+        try:
+            weekday = int(rule.split(":")[1])
+            if not 0 <= weekday <= 6:
+                return None
+            start = current_due_date if current_due_date else date.today()
+            start = start + timedelta(days=1)
+            days_ahead = weekday - start.weekday()
+            if days_ahead < 0:
+                days_ahead += 7
+            next_date = start + timedelta(days=days_ahead)
+        except (ValueError, IndexError):
+            return None
+    elif rule.startswith("monthly:"):
+        try:
+            day = int(rule.split(":")[1])
+            if not 1 <= day <= 31:
+                return None
+            if current_due_date:
+                year = current_due_date.year
+                month = current_due_date.month + 1
+                if month > 12:
+                    month = 1
+                    year += 1
+            else:
+                today = date.today()
+                year = today.year
+                month = today.month + 1
+                if month > 12:
+                    month = 1
+                    year += 1
+            while True:
+                try:
+                    next_date = date(year, month, day)
+                    break
+                except ValueError:
+                    month += 1
+                    if month > 12:
+                        month = 1
+                        year += 1
+        except (ValueError, IndexError):
+            return None
+    else:
+        return None
+
+    next_time = current_due_time if current_due_time else None
+    return (next_date, next_time)
+
+
 class Database:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = db_path or DB_PATH
@@ -223,6 +299,10 @@ class Database:
     def init_db(self) -> None:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            cols = conn.execute("PRAGMA table_info(tasks)").fetchall()
+            col_names = [c["name"] for c in cols]
+            if "recurrence_rule" not in col_names:
+                conn.execute("ALTER TABLE tasks ADD COLUMN recurrence_rule TEXT")
 
     # ── Projects ──────────────────────────────────────────────
 
@@ -369,11 +449,11 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO tasks (title, project_id, status, priority, due_date, due_time, "
-                "reminder_minutes_before, completed_at, created_at, updated_at, sort_order) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "reminder_minutes_before, completed_at, created_at, updated_at, sort_order, recurrence_rule) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (task.title, task.project_id, task.status, task.priority, task.due_date,
                  task.due_time, task.reminder_minutes_before, task.completed_at,
-                 now, now, task.sort_order),
+                 now, now, task.sort_order, task.recurrence_rule),
             )
             return cur.lastrowid
 
@@ -389,11 +469,11 @@ class Database:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE tasks SET title=?, project_id=?, status=?, priority=?, due_date=?, "
-                "due_time=?, reminder_minutes_before=?, completed_at=?, updated_at=?, sort_order=? "
-                "WHERE id=?",
+                "due_time=?, reminder_minutes_before=?, completed_at=?, updated_at=?, sort_order=?, "
+                "recurrence_rule=? WHERE id=?",
                 (task.title, task.project_id, task.status, task.priority, task.due_date,
                  task.due_time, task.reminder_minutes_before, task.completed_at,
-                 now, task.sort_order, task.id),
+                 now, task.sort_order, task.recurrence_rule, task.id),
             )
 
     def delete_task(self, task_id: int) -> None:
@@ -440,6 +520,56 @@ class Database:
                 (f"%{query}%",),
             ).fetchall()
             return [_row_to_task(r) for r in rows]
+
+    def generate_next_recurring(self, task_id: int) -> Optional[int]:
+        task = self.get_task(task_id)
+        if task is None or not task.recurrence_rule:
+            return None
+
+        next_occurrence = compute_next_occurrence(task)
+        if next_occurrence is None:
+            return None
+
+        next_due_date, next_due_time = next_occurrence
+
+        if task.project_id is not None:
+            sibling_tasks = self.get_tasks_by_project(task.project_id)
+        else:
+            all_tasks = self.get_all_tasks()
+            sibling_tasks = [t for t in all_tasks if t.project_id is None]
+        max_sort = max((t.sort_order for t in sibling_tasks), default=-1)
+        new_sort_order = max_sort + 1
+
+        new_task = Task(
+            title=task.title,
+            project_id=task.project_id,
+            status="todo",
+            priority=task.priority,
+            due_date=next_due_date.isoformat() if next_due_date else None,
+            due_time=next_due_time.isoformat() if next_due_time else None,
+            reminder_minutes_before=task.reminder_minutes_before,
+            completed_at=None,
+            sort_order=new_sort_order,
+            recurrence_rule=task.recurrence_rule,
+        )
+        new_task_id = self.create_task(new_task)
+
+        tags = self.get_tags(task_id)
+        for tag in tags:
+            if tag.id is not None:
+                self.add_task_tag(new_task_id, tag.id)
+
+        if task.reminder_minutes_before is not None and next_due_date is not None:
+            due_dt = datetime.combine(next_due_date, next_due_time or datetime.min.time())
+            remind_at = due_dt - timedelta(minutes=task.reminder_minutes_before)
+            reminder = Reminder(
+                task_id=new_task_id,
+                remind_at=remind_at.isoformat(),
+                dismissed=False,
+            )
+            self.create_reminder(reminder)
+
+        return new_task_id
 
     # ── Subtasks ──────────────────────────────────────────────
 
