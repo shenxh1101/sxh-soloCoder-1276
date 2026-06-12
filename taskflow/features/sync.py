@@ -128,24 +128,41 @@ class SyncManager:
         self._sync_backend: GitSync | WebDAVSync | None = None
         self._init_backend()
 
+    @property
+    def is_configured(self) -> bool:
+        return self.config.sync_method != "none" and self.config.sync_url != ""
+
     def _init_backend(self) -> None:
-        sync_cfg = getattr(self.config, "sync", None)
-        if sync_cfg is None:
-            return
-        method = getattr(sync_cfg, "method", None)
+        method = self.config.sync_method
+        url = self.config.sync_url
         if method == "git":
-            repo_path = Path(getattr(sync_cfg, "repo_path", str(SYNC_DIR / "git")))
+            repo_path = SYNC_DIR / "git"
             self._sync_backend = GitSync(self.db_path, repo_path)
+            self._sync_backend.init_repo(url)
         elif method == "webdav":
-            url = getattr(sync_cfg, "url", "")
-            username = getattr(sync_cfg, "username", None)
-            password = getattr(sync_cfg, "password", None)
-            auth = (username, password) if username and password else None
-            self._sync_backend = WebDAVSync(self.db_path, url, auth)
+            self._sync_backend = WebDAVSync(self.db_path, url)
 
     @property
     def last_sync_time(self) -> datetime | None:
         return self._last_sync_time
+
+    def sync_pull(self) -> bool:
+        if self._sync_backend is None:
+            logger.warning("no sync backend configured")
+            return False
+        ok = self._sync_backend.sync_pull()
+        if ok:
+            self._last_sync_time = datetime.now()
+        return ok
+
+    def sync_push(self) -> bool:
+        if self._sync_backend is None:
+            logger.warning("no sync backend configured")
+            return False
+        ok = self._sync_backend.sync_push()
+        if ok:
+            self._last_sync_time = datetime.now()
+        return ok
 
     def sync(self) -> bool:
         if self._sync_backend is None:

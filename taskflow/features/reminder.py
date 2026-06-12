@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from taskflow.database import Database
+from taskflow.db import Database
+from taskflow.db.models import Reminder, Task
 
 logger = logging.getLogger(__name__)
 
@@ -18,33 +17,29 @@ class ReminderManager:
         self._stop_event = threading.Event()
 
     def check_reminders(self) -> list[dict]:
-        now = datetime.now().isoformat()
-        rows = self.db.execute(
-            "SELECT r.id AS reminder_id, r.task_id, r.remind_at, t.title AS task_title "
-            "FROM reminders r JOIN tasks t ON r.task_id = t.id "
-            "WHERE r.remind_at <= ? AND r.dismissed = 0 "
-            "ORDER BY r.remind_at",
-            [now],
-        ).fetchall()
-        return [
-            {
-                "reminder_id": row["reminder_id"],
-                "task_id": row["task_id"],
-                "task_title": row["task_title"],
-                "remind_at": row["remind_at"],
-            }
-            for row in rows
-        ]
+        reminders = self.db.get_pending_reminders()
+        result: list[dict] = []
+        for r in reminders:
+            task = self.db.get_task(r.task_id) if r.task_id is not None else None
+            task_title = task.title if task else ""
+            result.append({
+                "reminder_id": r.id,
+                "task_id": r.task_id,
+                "task_title": task_title,
+                "remind_at": r.remind_at,
+            })
+        return result
 
     def dismiss_reminder(self, reminder_id: int) -> None:
-        self.db.execute("UPDATE reminders SET dismissed = 1 WHERE id = ?", [reminder_id])
+        self.db.dismiss_reminder(reminder_id)
 
     def schedule_reminder(self, task_id: int, remind_at: datetime) -> int:
-        cursor = self.db.execute(
-            "INSERT INTO reminders (task_id, remind_at, dismissed) VALUES (?, ?, 0)",
-            [task_id, remind_at.isoformat()],
+        reminder = Reminder(
+            task_id=task_id,
+            remind_at=remind_at.isoformat(),
+            dismissed=False,
         )
-        return cursor.lastrowid
+        return self.db.create_reminder(reminder)
 
     def send_notification(self, title: str, message: str) -> None:
         try:

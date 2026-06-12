@@ -253,6 +253,39 @@ class Database:
                 ).fetchall()
             return [_row_to_project(r) for r in rows]
 
+    def get_project_by_name(self, name: str, parent_id: Optional[int] = None) -> Optional[Project]:
+        with self._connect() as conn:
+            if parent_id is None:
+                row = conn.execute(
+                    "SELECT * FROM projects WHERE name = ? AND parent_id IS NULL",
+                    (name,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM projects WHERE name = ? AND parent_id = ?",
+                    (name, parent_id),
+                ).fetchone()
+            return _row_to_project(row) if row else None
+
+    def get_or_create_project(self, name: str, parent_id: Optional[int] = None) -> Project:
+        existing = self.get_project_by_name(name, parent_id)
+        if existing is not None:
+            return existing
+        new_project = Project(name=name, parent_id=parent_id)
+        new_id = self.create_project(new_project)
+        new_project.id = new_id
+        return new_project
+
+    def get_or_create_tag(self, name: str, color: Optional[str] = None) -> Tag:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM tags WHERE name = ?", (name,)).fetchone()
+            if row:
+                return _row_to_tag(row)
+        new_tag = Tag(name=name, color=color)
+        new_id = self.create_tag(new_tag)
+        new_tag.id = new_id
+        return new_tag
+
     def update_project(self, project: Project) -> None:
         if project.id is None:
             return
@@ -541,6 +574,20 @@ class Database:
         with self._connect() as conn:
             conn.execute("DELETE FROM pomodoro_sessions WHERE id = ?", (session_id,))
 
+    def get_pomodoro_sessions(self, date_range: Optional[Tuple[str, str]] = None) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            if date_range:
+                start_date, end_date = date_range
+                rows = conn.execute(
+                    "SELECT * FROM pomodoro_sessions WHERE started_at BETWEEN ? AND ? ORDER BY started_at",
+                    (start_date, end_date),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM pomodoro_sessions ORDER BY started_at"
+                ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_pomodoro_stats(self, date_range: Tuple[str, str]) -> Dict[str, Any]:
         start_date, end_date = date_range
         with self._connect() as conn:
@@ -627,6 +674,50 @@ class Database:
             conn.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
 
     # ── Stats ─────────────────────────────────────────────────
+
+    def get_all_tasks(self) -> List[Task]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks ORDER BY COALESCE(due_date, '9999-12-31'), sort_order"
+            ).fetchall()
+            return [_row_to_task(r) for r in rows]
+
+    def get_task_with_details(self, task_id: int) -> Optional[Dict[str, Any]]:
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        project = self.get_project(task.project_id) if task.project_id else None
+        tags = self.get_tags(task_id)
+        subtasks = self.get_subtasks(task_id)
+        notes = self.get_notes(task_id)
+        attachments = self.get_attachments(task_id)
+        return {
+            "id": task.id,
+            "title": task.title,
+            "project_id": task.project_id,
+            "project_name": project.name if project else None,
+            "status": task.status,
+            "priority": task.priority,
+            "due_date": task.due_date,
+            "due_time": task.due_time,
+            "reminder_minutes_before": task.reminder_minutes_before,
+            "completed_at": task.completed_at,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+            "sort_order": task.sort_order,
+            "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in tags],
+            "subtasks": [{"id": s.id, "title": s.title, "done": s.done} for s in subtasks],
+            "notes": [{"id": n.id, "content": n.content, "created_at": n.created_at} for n in notes],
+            "attachments": [{"id": a.id, "name": a.name, "path_or_url": a.path_or_url} for a in attachments],
+        }
+
+    def query_all(self, sql: str, params: Optional[Tuple[Any, ...]] = None) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            if params:
+                rows = conn.execute(sql, params).fetchall()
+            else:
+                rows = conn.execute(sql).fetchall()
+            return [dict(r) for r in rows]
 
     def get_weekly_stats(self, start_date: str, end_date: str) -> Dict[str, Any]:
         with self._connect() as conn:

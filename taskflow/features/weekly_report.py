@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
+from rich.console import RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-if TYPE_CHECKING:
-    from rich.console import RenderableType
-
-    from taskflow.database import Database
+from taskflow.db import Database
 
 
 class WeeklyReport:
@@ -25,44 +23,44 @@ class WeeklyReport:
         return week_start, week_end
 
     def _fetch_completed(self, start: date, end: date) -> list[dict]:
-        return self.db.execute(
+        return self.db.query_all(
             "SELECT t.*, p.name AS project_name FROM tasks t "
             "LEFT JOIN projects p ON t.project_id = p.id "
             "WHERE t.status = 'done' AND t.completed_at >= ? AND t.completed_at <= ? "
             "ORDER BY p.name, t.completed_at",
-            [start.isoformat(), end.isoformat()],
-        ).fetchall()
+            (start.isoformat(), end.isoformat()),
+        )
 
     def _fetch_created(self, start: date, end: date) -> list[dict]:
-        return self.db.execute(
+        return self.db.query_all(
             "SELECT * FROM tasks WHERE created_at >= ? AND created_at <= ?",
-            [start.isoformat(), end.isoformat()],
-        ).fetchall()
+            (start.isoformat(), end.isoformat()),
+        )
 
     def _fetch_pomodoro_summary(self, start: date, end: date) -> list[dict]:
-        return self.db.execute(
+        return self.db.query_all(
             "SELECT t.title, SUM(p.duration_minutes) AS total_minutes "
-            "FROM pomodoros p JOIN tasks t ON p.task_id = t.id "
+            "FROM pomodoro_sessions p JOIN tasks t ON p.task_id = t.id "
             "WHERE p.started_at >= ? AND p.started_at <= ? "
             "GROUP BY p.task_id ORDER BY total_minutes DESC",
-            [start.isoformat(), end.isoformat()],
-        ).fetchall()
+            (start.isoformat(), end.isoformat()),
+        )
 
     def _fetch_overdue(self, end: date) -> list[dict]:
-        return self.db.execute(
+        return self.db.query_all(
             "SELECT * FROM tasks WHERE status != 'done' AND due_date < ? AND due_date IS NOT NULL "
             "ORDER BY due_date",
-            [end.isoformat()],
-        ).fetchall()
+            (end.isoformat(),),
+        )
 
     def _fetch_next_week(self, week_end: date) -> list[dict]:
         next_start = week_end + timedelta(days=1)
         next_end = next_start + timedelta(days=6)
-        return self.db.execute(
+        return self.db.query_all(
             "SELECT * FROM tasks WHERE status != 'done' AND due_date >= ? AND due_date <= ? "
             "ORDER BY due_date",
-            [next_start.isoformat(), next_end.isoformat()],
-        ).fetchall()
+            (next_start.isoformat(), next_end.isoformat()),
+        )
 
     def _priority_distribution(self, created: list[dict]) -> dict[str, int]:
         dist: dict[str, int] = {}

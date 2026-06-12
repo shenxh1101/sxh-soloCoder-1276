@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING
 
 from rapidfuzz import fuzz
 
+from taskflow.db import Database
+
 if TYPE_CHECKING:
-    from taskflow.core.db import Database
+    pass
 
 
 @dataclass
@@ -33,39 +35,51 @@ class SearchEngine:
         items: list[dict] = []
         tasks = self.db.get_all_tasks()
         for task in tasks:
+            task_id = getattr(task, "id", None)
             entry: dict = {
-                "task_id": task.get("id"),
-                "title": task.get("title", ""),
+                "task_id": task_id,
+                "title": getattr(task, "title", "") or "",
                 "notes": "",
                 "tags": "",
                 "project": "",
                 "attachments": "",
             }
-            notes = task.get("notes") or task.get("note") or ""
-            if isinstance(notes, list):
-                notes = " ".join(str(n) for n in notes)
-            entry["notes"] = str(notes)
 
-            tags = task.get("tags") or []
-            if isinstance(tags, str):
-                entry["tags"] = tags
-            elif isinstance(tags, list):
-                entry["tags"] = " ".join(str(t) for t in tags)
+            if task_id is not None:
+                details = self.db.get_task_with_details(task_id)
+                if details:
+                    entry["title"] = details.get("title") or entry["title"]
+                    entry["project"] = details.get("project_name") or ""
 
-            project = task.get("project") or task.get("project_name") or ""
-            entry["project"] = str(project)
+                    tags = details.get("tags") or []
+                    if isinstance(tags, list):
+                        tag_names = []
+                        for t in tags:
+                            if isinstance(t, dict):
+                                tag_names.append(t.get("name", "") or "")
+                            else:
+                                tag_names.append(str(t) or "")
+                        entry["tags"] = " ".join(tag_names)
 
-            attachments = task.get("attachments") or []
-            if isinstance(attachments, str):
-                entry["attachments"] = attachments
-            elif isinstance(attachments, list):
-                names = []
-                for att in attachments:
-                    if isinstance(att, dict):
-                        names.append(att.get("name", ""))
-                    else:
-                        names.append(str(att))
-                entry["attachments"] = " ".join(names)
+                    notes = details.get("notes") or []
+                    if isinstance(notes, list):
+                        note_contents = []
+                        for n in notes:
+                            if isinstance(n, dict):
+                                note_contents.append(n.get("content", "") or "")
+                            else:
+                                note_contents.append(str(n) or "")
+                        entry["notes"] = " ".join(note_contents)
+
+                    attachments = details.get("attachments") or []
+                    if isinstance(attachments, list):
+                        att_names = []
+                        for a in attachments:
+                            if isinstance(a, dict):
+                                att_names.append(a.get("name", "") or "")
+                            else:
+                                att_names.append(str(a) or "")
+                        entry["attachments"] = " ".join(att_names)
 
             items.append(entry)
         self._items = items

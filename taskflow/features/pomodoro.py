@@ -1,24 +1,18 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from time import time
 from typing import TYPE_CHECKING
 
 from rich.bar import Bar
 
+from taskflow.db import Database
+from taskflow.config import Config
+from taskflow.db.models import PomodoroSession
+
 if TYPE_CHECKING:
-    from taskflow.core.config import Config
-    from taskflow.core.db import Database
-
-
-@dataclass
-class PomodoroSession:
-    task_id: int
-    start_time: datetime
-    duration: int
-    completed: bool
+    pass
 
 
 class PomodoroTimer:
@@ -34,6 +28,7 @@ class PomodoroTimer:
         self._thread: threading.Thread | None = None
         self._start_timestamp: float = 0.0
         self._pause_elapsed: int = 0
+        self._duration_seconds: int = 0
 
     @property
     def is_running(self) -> bool:
@@ -47,11 +42,12 @@ class PomodoroTimer:
         if self._running:
             raise RuntimeError("A pomodoro session is already running")
 
-        duration = self.config.get("pomodoro_duration", 25) * 60
+        duration_minutes = self.config.pomodoro_duration
+        self._duration_seconds = duration_minutes * 60
         self._session = PomodoroSession(
             task_id=task_id,
-            start_time=datetime.now(),
-            duration=duration,
+            started_at=datetime.now().isoformat(),
+            duration_minutes=duration_minutes,
             completed=False,
         )
         self._elapsed = 0
@@ -99,9 +95,7 @@ class PomodoroTimer:
         return current_elapsed
 
     def get_remaining(self) -> int:
-        if self._session is None:
-            return 0
-        remaining = self._session.duration - self.get_elapsed()
+        remaining = self._duration_seconds - self.get_elapsed()
         return max(remaining, 0)
 
     def _tick(self) -> None:
@@ -115,15 +109,10 @@ class PomodoroTimer:
             elapsed = self.get_elapsed()
             self._elapsed = elapsed
 
-            if self._session is not None and elapsed >= self._session.duration:
+            if self._session is not None and elapsed >= self._duration_seconds:
                 self._session.completed = True
                 self._running = False
-                self.db.add_pomodoro_session(
-                    task_id=self._session.task_id,
-                    start_time=self._session.start_time,
-                    duration=self._session.duration,
-                    completed=True,
-                )
+                self.db.add_pomodoro_session(self._session)
                 break
 
 
@@ -140,11 +129,18 @@ class PomodoroStats:
             stats[d] = 0
 
         for session in sessions:
-            if not session.get("completed", False):
+            if session.get("completed", 0) != 1:
                 continue
-            session_date = session["start_time"].date() if isinstance(session["start_time"], datetime) else session["start_time"]
+            started_at_str = session.get("started_at")
+            if not started_at_str:
+                continue
+            try:
+                start_dt = datetime.fromisoformat(started_at_str)
+            except (ValueError, TypeError):
+                continue
+            session_date = start_dt.date()
             if session_date in stats:
-                stats[session_date] += session.get("duration", 0) // 60
+                stats[session_date] += session.get("duration_minutes", 0)
 
         return stats
 
@@ -154,10 +150,14 @@ class PomodoroStats:
         hours: dict[int, int] = {h: 0 for h in range(24)}
 
         for session in sessions:
-            if not session.get("completed", False):
+            if session.get("completed", 0) != 1:
                 continue
-            start = session["start_time"]
-            if not isinstance(start, datetime):
+            started_at_str = session.get("started_at")
+            if not started_at_str:
+                continue
+            try:
+                start = datetime.fromisoformat(started_at_str)
+            except (ValueError, TypeError):
                 continue
             if start < cutoff:
                 continue
@@ -192,11 +192,16 @@ class PomodoroStats:
     def _has_session_on(self, d: date) -> bool:
         sessions = self.db.get_pomodoro_sessions()
         for session in sessions:
-            if not session.get("completed", False):
+            if session.get("completed", 0) != 1:
                 continue
-            start = session["start_time"]
-            session_date = start.date() if isinstance(start, datetime) else start
-            if session_date == d:
+            started_at_str = session.get("started_at")
+            if not started_at_str:
+                continue
+            try:
+                start = datetime.fromisoformat(started_at_str)
+            except (ValueError, TypeError):
+                continue
+            if start.date() == d:
                 return True
         return False
 

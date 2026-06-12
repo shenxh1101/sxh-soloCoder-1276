@@ -1,0 +1,555 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rapidfuzz import fuzz
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from taskflow.config import Config, get_db_path, load_config, save_config
+from taskflow.db import Database
+from taskflow.db.models import Project, Reminder, Tag, Task
+from taskflow.features.nlp_parser import parse_natural_task
+from taskflow.features.pomodoro import PomodoroStats, PomodoroTimer
+from taskflow.features.reminder import ReminderManager
+from taskflow.features.search import SearchEngine
+from taskflow.features.sync import SyncManager
+from taskflow.features.themes import BUILT_IN_THEMES, Theme, get_theme, list_themes
+from taskflow.features.weekly_report import WeeklyReport
+
+app = typer.Typer(add_completion=False, no_args_is_help=False)
+console = Console()
+
+
+def _get_next_sort_order(db: Database, project_id: Optional[int]) -> int:
+    if project_id is not None:
+        tasks = db.get_tasks_by_project(project_id)
+    else:
+        all_tasks = db.get_all_tasks()
+        tasks = [t for t in all_tasks if t.project_id is None]
+    if not tasks:
+        return 0
+    return max(t.sort_order for t in tasks) + 1
+
+
+def _tasks_by_status(db: Database, status: str) -> list[Task]:
+    return db.get_tasks_by_status(status)
+
+
+def _fuzzy_search(db: Database, query: str, limit: int = 20) -> list[dict]:
+    if not query.strip():
+        return []
+
+    field_weights: dict[str, float] = {
+        "title": 3.0,
+        "project": 2.0,
+        "tags": 2.0,
+        "notes": 1.0,
+    }
+
+    items: list[dict] = []
+    tasks = db.get_all_tasks()
+    for task in tasks:
+        details = db.get_task_with_details(task.id) if task.id else None
+        entry: dict = {
+            "task_id": task.id,
+            "title": task.title,
+            "notes": "",
+            "tags": "",
+            "project": "",
+        }
+        if details:
+            notes_list = details.get("notes", [])
+            try:
+                entry["notes"] = " ".join(str(n.get("content", "")) for n in notes_list)
+            except (TypeError, AttributeError):
+                entry["notes"] = str(notes_list)
+            tags_list = details.get("tags", [])
+            try:
+                entry["tags"] = " ".join(str(t.get("name", "")) for t in tags_list)
+            except (TypeError, AttributeError):
+                entry["tags"] = str(tags_list)
+            entry["project"] = details.get("project_name", "") or ""
+        items.append(entry)
+
+    results: list[dict] = []
+    for item in items:
+        best_score = 0.0
+        best_field = ""
+        for field, weight in field_weights.items():
+            field_value = item.get(field, "")
+            if not field_value:
+                continue
+            score = fuzz.token_sort_ratio(query, field_value) * weight
+            if score > best_score:
+                best_score = score
+                best_field = field
+        if best_score > 0:
+            results.append({
+                "item": item,
+                "score": best_score,
+                "matched_field": best_field,
+            })
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results[:limit]
+
+
+def _week_range(week_start: Optional[date] = None) -> tuple[date, date]:
+    if week_start is None:
+        week_start = date.today() - timedelta(days=date.today().weekday())
+    week_end = week_start + timedelta(days=6)
+    return week_start, week_end
+
+
+@app.callback(invoke_without_command=True)
+def tui(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        try:
+            from taskflow.tui import run
+            run()
+        except ImportError:
+            console.print("[yellow]TUI not available. Use --help to see available commands.[/yellow]")
+
+
+@app.command()
+def add(text: str) -> None:
+    config = load_config()
+    db = Database(get_db_path())
+    db.init_db()
+
+    result = parse_natural_task(text)
+
+    project_id: Optional[int] = None
+    if result.project:
+        project = db.get_or_create_project(result.project)
+        project_id = project.id
+
+    sort_order = _get_next_sort_order(db, project_id)
+
+    reminder_minutes_before: Optional[int] = None
+    if result.due_date is not None or result.due_time is not None:
+        reminder_minutes_before = 15
+
+    task = Task(
+        title=result.title,
+        project_id=project_id,
+        status="todo",
+        priority=result.priority,
+        due_date=result.due_date.isoformat() if result.due_date else None,
+        due_time=result.due_time.isoformat() if result.due_time else None,
+        reminder_minutes_before=reminder_minutes_before,
+        sort_order=sort_order,
+    )
+    task_id = db.create_task(task)
+
+    for tag_name in result.tags:
+        tag = db.get_or_create_tag(tag_name)
+        if tag.id is not None:
+            db.add_task_tag(task_id, tag.id)
+
+    if result.due_date is not None and reminder_minutes_before is not None:
+        due_dt = datetime.combine(result.due_date, result.due_time or datetime.min.time())
+        remind_at = due_dt - timedelta(minutes=reminder_minutes_before)
+        reminder = Reminder(
+            task_id=task_id,
+            remind_at=remind_at.isoformat(),
+            dismissed=False,
+        )
+        db.create_reminder(reminder)
+
+    table = Table(title="Task Created", show_header=True)
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("ID", str(task_id))
+    table.add_row("Title", result.title)
+    if result.project:
+        table.add_row("Project", result.project)
+    if result.priority:
+        table.add_row("Priority", result.priority)
+    if result.due_date:
+        table.add_row("Due Date", result.due_date.isoformat())
+    if result.due_time:
+        table.add_row("Due Time", result.due_time.isoformat())
+    if result.tags:
+        table.add_row("Tags", ", ".join(result.tags))
+    console.print(table)
+
+
+@app.command()
+def complete(task_id: int) -> None:
+    config = load_config()
+    db = Database(get_db_path())
+    db.init_db()
+
+    task = db.get_task(task_id)
+    if task is None:
+        console.print(f"[red]Task {task_id} not found[/red]")
+        raise typer.Exit(1)
+
+    task.status = "done"
+    task.completed_at = datetime.now().isoformat()
+    db.update_task(task)
+
+    console.print(f"[green]Task {task_id} marked as complete:[/green] {task.title}")
+
+
+@app.command()
+def list(
+    status: Optional[str] = None,
+    project: Optional[str] = None,
+) -> None:
+    config = load_config()
+    db = Database(get_db_path())
+    db.init_db()
+
+    tasks = db.get_all_tasks()
+
+    if status:
+        tasks = [t for t in tasks if t.status == status]
+
+    if project:
+        proj = db.get_project_by_name(project)
+        if proj is None:
+            console.print(f"[red]Project '{project}' not found[/red]")
+            raise typer.Exit(1)
+        tasks = [t for t in tasks if t.project_id == proj.id]
+
+    table = Table(title="Tasks", show_header=True)
+    table.add_column("ID", justify="right")
+    table.add_column("Title")
+    table.add_column("Status")
+    table.add_column("Priority")
+    table.add_column("Due Date")
+    table.add_column("Project")
+
+    for task in tasks:
+        proj_name = ""
+        if task.project_id:
+            proj = db.get_project(task.project_id)
+            if proj:
+                proj_name = proj.name
+        due = task.due_date or ""
+        if task.due_time:
+            due = f"{due} {task.due_time}" if due else task.due_time
+        table.add_row(
+            str(task.id) if task.id else "",
+            task.title,
+            task.status,
+            task.priority or "",
+            due,
+            proj_name,
+        )
+
+    if not tasks:
+        console.print("[yellow]No tasks found[/yellow]")
+    else:
+        console.print(table)
+
+
+@app.command()
+def search(query: str) -> None:
+    config = load_config()
+    db = Database(get_db_path())
+    db.init_db()
+
+    results = _fuzzy_search(db, query)
+
+    table = Table(title=f"Search Results for '{query}'", show_header=True)
+    table.add_column("ID", justify="right")
+    table.add_column("Title")
+    table.add_column("Matched Field")
+    table.add_column("Score", justify="right")
+
+    for r in results:
+        item = r["item"]
+        table.add_row(
+            str(item.get("task_id", "")),
+            item.get("title", ""),
+            r["matched_field"],
+            f"{r['score']:.1f}",
+        )
+
+    if not results:
+        console.print(f"[yellow]No results found for '{query}'[/yellow]")
+    else:
+        console.print(table)
+
+
+@app.command()
+def report(week: Optional[str] = None) -> None:
+    config = load_config()
+    db = Database(get_db_path())
+    db.init_db()
+
+    week_start: Optional[date] = None
+    if week:
+        try:
+            week_start = date.fromisoformat(week)
+        except ValueError:
+            console.print(f"[red]Invalid week date: {week}. Use ISO format YYYY-MM-DD[/red]")
+            raise typer.Exit(1)
+
+    start, end = _week_range(week_start)
+    stats = db.get_weekly_stats(start.isoformat(), end.isoformat())
+
+    header = Panel(
+        Text(f"Weekly Report: {start.isoformat()} ~ {end.isoformat()}", style="bold cyan", justify="center"),
+        style="cyan",
+    )
+    console.print(header)
+
+    summary_table = Table(title="Summary", show_header=True)
+    summary_table.add_column("Metric", style="bold")
+    summary_table.add_column("Value", justify="right")
+    summary_table.add_row("Tasks Created", str(stats.get("tasks_created", 0)))
+    summary_table.add_row("Tasks Completed", str(stats.get("tasks_completed", 0)))
+    completion_rate = 0.0
+    if stats.get("tasks_created", 0) > 0:
+        completion_rate = (stats.get("tasks_completed", 0) / stats.get("tasks_created", 0)) * 100
+    summary_table.add_row("Completion Rate", f"{completion_rate:.1f}%")
+    summary_table.add_row("Overdue Tasks", str(stats.get("overdue_tasks", 0)))
+    console.print(summary_table)
+
+    status_table = Table(title="Tasks by Status", show_header=True)
+    status_table.add_column("Status", style="bold")
+    status_table.add_column("Count", justify="right")
+    for s, count in stats.get("tasks_by_status", {}).items():
+        status_table.add_row(s, str(count))
+    console.print(status_table)
+
+    pomo = stats.get("pomodoro", {})
+    pomo_table = Table(title="Pomodoro Stats", show_header=True)
+    pomo_table.add_column("Metric", style="bold")
+    pomo_table.add_column("Value", justify="right")
+    pomo_table.add_row("Total Sessions", str(pomo.get("total_sessions", 0)))
+    pomo_table.add_row("Total Minutes", str(pomo.get("total_minutes", 0)))
+    pomo_table.add_row("Completed Sessions", str(pomo.get("completed_sessions", 0)))
+    pomo_table.add_row("Completed Minutes", str(pomo.get("completed_minutes", 0)))
+    console.print(pomo_table)
+
+
+@app.command()
+def sync(
+    push: bool = False,
+    pull: bool = False,
+) -> None:
+    config = load_config()
+    db_path = get_db_path()
+    sync_mgr = SyncManager(db_path, config)
+
+    if not sync_mgr.is_configured:
+        console.print("[yellow]Sync is not configured. Set sync_method and sync_url using config-set.[/yellow]")
+        raise typer.Exit(0)
+
+    if not push and not pull:
+        push = True
+        pull = True
+
+    pull_ok = True
+    push_ok = True
+
+    if pull:
+        pull_ok = sync_mgr.sync_pull()
+        if pull_ok:
+            console.print("[green]Sync pull successful[/green]")
+        else:
+            console.print("[red]Sync pull failed[/red]")
+
+    if push:
+        push_ok = sync_mgr.sync_push()
+        if push_ok:
+            console.print("[green]Sync push successful[/green]")
+        else:
+            console.print("[red]Sync push failed[/red]")
+
+    if pull_ok and push_ok:
+        console.print("[bold green]Sync completed successfully[/bold green]")
+    else:
+        console.print("[bold red]Sync completed with errors[/bold red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def pomodoro(
+    task_id: Optional[int] = None,
+    action: str = "start",
+) -> None:
+    config = load_config()
+    db = Database(get_db_path())
+    db.init_db()
+
+    valid_actions = ["start", "pause", "resume", "cancel", "stats"]
+    if action not in valid_actions:
+        console.print(f"[red]Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}[/red]")
+        raise typer.Exit(1)
+
+    if action == "stats":
+        pomo_stats = PomodoroStats(db)
+        start, end = _week_range()
+        week_stats = db.get_pomodoro_stats((start.isoformat(), end.isoformat()))
+
+        table = Table(title="Pomodoro Stats (This Week)", show_header=True)
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="right")
+        table.add_row("Total Sessions", str(week_stats.get("total_sessions", 0)))
+        table.add_row("Total Minutes", str(week_stats.get("total_minutes", 0)))
+        table.add_row("Completed Sessions", str(week_stats.get("completed_sessions", 0)))
+        table.add_row("Completed Minutes", str(week_stats.get("completed_minutes", 0)))
+        console.print(table)
+
+        by_task = week_stats.get("by_task", {})
+        if by_task:
+            task_table = Table(title="By Task", show_header=True)
+            task_table.add_column("Task ID", justify="right")
+            task_table.add_column("Sessions", justify="right")
+            task_table.add_column("Minutes", justify="right")
+            for tid, info in by_task.items():
+                task_table.add_row(str(tid), str(info.get("count", 0)), str(info.get("total_minutes", 0)))
+            console.print(task_table)
+        return
+
+    if action == "start":
+        if task_id is None:
+            console.print("[red]task_id is required for 'start' action[/red]")
+            raise typer.Exit(1)
+        task = db.get_task(task_id)
+        if task is None:
+            console.print(f"[red]Task {task_id} not found[/red]")
+            raise typer.Exit(1)
+
+        duration = config.pomodoro_duration
+        from taskflow.db.models import PomodoroSession as DBPomodoroSession
+        session = DBPomodoroSession(
+            task_id=task_id,
+            started_at=datetime.now().isoformat(),
+            duration_minutes=duration,
+            completed=False,
+        )
+        db.add_pomodoro_session(session)
+        console.print(f"[green]Pomodoro started for task {task_id}:[/green] {task.title}")
+        console.print(f"[cyan]Duration: {duration} minutes[/cyan]")
+        bar = ""
+        filled = 0
+        total = 20
+        bar = "█" * filled + "░" * (total - filled)
+        console.print(f"[{bar}] 0%")
+        return
+
+    if action == "pause":
+        console.print("[yellow]Pomodoro paused[/yellow]")
+        return
+
+    if action == "resume":
+        console.print("[green]Pomodoro resumed[/green]")
+        return
+
+    if action == "cancel":
+        console.print("[red]Pomodoro cancelled[/red]")
+        return
+
+
+@app.command("config-show")
+def config_show() -> None:
+    config = load_config()
+
+    table = Table(title="Current Configuration", show_header=True)
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+    table.add_row("theme", config.theme)
+    table.add_row("sync_method", config.sync_method)
+    table.add_row("sync_url", config.sync_url)
+    table.add_row("pomodoro_duration", str(config.pomodoro_duration))
+    table.add_row("pomodoro_break", str(config.pomodoro_break))
+    table.add_row("pomodoro_long_break", str(config.pomodoro_long_break))
+    table.add_row("default_view", config.default_view)
+    table.add_row("language", config.language)
+    console.print(table)
+
+    themes = list_themes()
+    theme_table = Table(title="Available Themes", show_header=True)
+    theme_table.add_column("Theme Name", style="bold cyan")
+    theme_table.add_column("Type")
+    for name in themes:
+        theme_type = "Built-in" if name in BUILT_IN_THEMES else "Custom"
+        theme_table.add_row(name, theme_type)
+    console.print(theme_table)
+
+
+@app.command("config-set")
+def config_set(key: str, value: str) -> None:
+    valid_keys = ["theme", "sync_method", "sync_url", "pomodoro_duration", "default_view", "language"]
+    if key not in valid_keys:
+        console.print(f"[red]Invalid config key '{key}'. Must be one of: {', '.join(valid_keys)}[/red]")
+        raise typer.Exit(1)
+
+    config = load_config()
+
+    if key == "theme":
+        available = list_themes()
+        if value not in available:
+            console.print(f"[red]Unknown theme '{value}'. Available: {', '.join(available)}[/red]")
+            raise typer.Exit(1)
+        config.theme = value
+    elif key == "sync_method":
+        if value not in ["none", "git", "webdav"]:
+            console.print("[red]sync_method must be one of: none, git, webdav[/red]")
+            raise typer.Exit(1)
+        config.sync_method = value
+    elif key == "sync_url":
+        config.sync_url = value
+    elif key == "pomodoro_duration":
+        try:
+            config.pomodoro_duration = int(value)
+        except ValueError:
+            console.print("[red]pomodoro_duration must be an integer[/red]")
+            raise typer.Exit(1)
+    elif key == "default_view":
+        config.default_view = value
+    elif key == "language":
+        config.language = value
+
+    save_config(config)
+    console.print(f"[green]Config updated: {key} = {value}[/green]")
+
+
+@app.command("reminder-check")
+def reminder_check() -> None:
+    config = load_config()
+    db = Database(get_db_path())
+    db.init_db()
+
+    reminders = db.get_pending_reminders()
+
+    if not reminders:
+        console.print("[green]No pending reminders[/green]")
+        return
+
+    table = Table(title="Due Reminders", show_header=True)
+    table.add_column("Reminder ID", justify="right")
+    table.add_column("Task ID", justify="right")
+    table.add_column("Task Title")
+    table.add_column("Remind At")
+
+    for reminder in reminders:
+        task = db.get_task(reminder.task_id) if reminder.task_id else None
+        task_title = task.title if task else "(unknown)"
+        table.add_row(
+            str(reminder.id) if reminder.id else "",
+            str(reminder.task_id),
+            task_title,
+            reminder.remind_at or "",
+        )
+        reminder.dismissed = True
+        db.update_reminder(reminder)
+
+    console.print(table)
+
+
+if __name__ == "__main__":
+    app()
