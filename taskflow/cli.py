@@ -263,14 +263,23 @@ def search(query: str) -> None:
     table = Table(title=f"Search Results for '{query}'", show_header=True)
     table.add_column("ID", justify="right")
     table.add_column("Title")
+    table.add_column("Due")
     table.add_column("Matched Field")
     table.add_column("Score", justify="right")
 
     for r in results:
         item = r["item"]
+        task_id = item.get("task_id")
+        task = db.get_task(task_id) if task_id else None
+        due = ""
+        if task:
+            due = task.due_date or ""
+            if task.due_time:
+                due = f"{due} {task.due_time[:5]}" if due else task.due_time[:5]
         table.add_row(
             str(item.get("task_id", "")),
             item.get("title", ""),
+            due,
             r["matched_field"],
             f"{r['score']:.1f}",
         )
@@ -309,7 +318,11 @@ def sync(
     sync_mgr = SyncManager(db_path, config)
 
     if not sync_mgr.is_configured:
-        console.print("[yellow]Sync is not configured. Set sync_method and sync_url using config-set.[/yellow]")
+        if config.sync_method == "none":
+            console.print("[yellow]未配置同步。如需启用，请先运行: config-set sync_method git|webdav[/yellow]")
+        else:
+            console.print("[red]同步配置不完整：缺少 sync_url[/red]")
+            console.print(f"[yellow]请运行: config-set sync_url <地址> 来设置 {config.sync_method} 同步地址[/yellow]")
         raise typer.Exit(0)
 
     if not push and not pull:
@@ -539,30 +552,58 @@ def reminder_check() -> None:
     db = Database(get_db_path())
     db.init_db()
 
-    reminders = db.get_pending_reminders()
+    upcoming = db.get_upcoming_reminders(days=7)
+    pending = db.get_pending_reminders()
 
-    if not reminders:
-        console.print("[green]No pending reminders[/green]")
+    if not upcoming and not pending:
+        console.print("[green]No upcoming reminders[/green]")
         return
 
-    table = Table(title="Due Reminders", show_header=True)
-    table.add_column("Reminder ID", justify="right")
+    table = Table(title="Reminders", show_header=True)
+    table.add_column("Status", width=8)
     table.add_column("Task ID", justify="right")
     table.add_column("Task Title")
     table.add_column("Remind At")
+    table.add_column("Due")
 
-    for reminder in reminders:
+    for reminder in pending:
         task = db.get_task(reminder.task_id) if reminder.task_id else None
         task_title = task.title if task else "(unknown)"
         remind_at_str = reminder.remind_at.replace("T", " ")[:16] if reminder.remind_at else ""
+        due = ""
+        if task:
+            due = task.due_date or ""
+            if task.due_time:
+                due = f"{due} {task.due_time[:5]}" if due else task.due_time[:5]
         table.add_row(
-            str(reminder.id) if reminder.id else "",
+            Text("DUE", style="bold red"),
             str(reminder.task_id),
             task_title,
             remind_at_str,
+            due,
         )
         reminder.dismissed = True
         db.update_reminder(reminder)
+
+    pending_ids = {r.id for r in pending}
+    for reminder in upcoming:
+        if reminder.id in pending_ids or reminder.id is None:
+            continue
+        task = db.get_task(reminder.task_id) if reminder.task_id else None
+        task_title = task.title if task else "(unknown)"
+        remind_at_str = reminder.remind_at.replace("T", " ")[:16] if reminder.remind_at else ""
+        due = ""
+        if task:
+            due = task.due_date or ""
+            if task.due_time:
+                due = f"{due} {task.due_time[:5]}" if due else task.due_time[:5]
+        table.add_row(
+            Text("SOON", style="yellow"),
+            str(reminder.task_id),
+            task_title,
+            remind_at_str,
+            due,
+        )
 
     console.print(table)
 

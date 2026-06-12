@@ -28,13 +28,13 @@ class WeeklyReport:
             "LEFT JOIN projects p ON t.project_id = p.id "
             "WHERE t.status = 'done' AND t.completed_at >= ? AND t.completed_at <= ? "
             "ORDER BY p.name, t.completed_at",
-            (start.isoformat(), end.isoformat()),
+            (start.isoformat(), f"{end.isoformat()}T23:59:59"),
         )
 
     def _fetch_created(self, start: date, end: date) -> list[dict]:
         return self.db.query_all(
             "SELECT * FROM tasks WHERE created_at >= ? AND created_at <= ?",
-            (start.isoformat(), end.isoformat()),
+            (start.isoformat(), f"{end.isoformat()}T23:59:59"),
         )
 
     def _fetch_pomodoro_summary(self, start: date, end: date) -> list[dict]:
@@ -43,7 +43,7 @@ class WeeklyReport:
             "FROM pomodoro_sessions p JOIN tasks t ON p.task_id = t.id "
             "WHERE p.completed = 1 AND p.started_at >= ? AND p.started_at <= ? "
             "GROUP BY p.task_id ORDER BY total_minutes DESC",
-            (start.isoformat(), end.isoformat()),
+            (start.isoformat(), f"{end.isoformat()}T23:59:59"),
         )
 
     def _fetch_overdue(self, end: date) -> list[dict]:
@@ -62,6 +62,13 @@ class WeeklyReport:
             (next_start.isoformat(), next_end.isoformat()),
         )
 
+    def _fetch_this_week_plan(self, start: date, end: date) -> list[dict]:
+        return self.db.query_all(
+            "SELECT * FROM tasks WHERE status != 'done' AND due_date IS NOT NULL AND due_date >= ? AND due_date <= ? "
+            "ORDER BY due_date",
+            (start.isoformat(), end.isoformat()),
+        )
+
     def _priority_distribution(self, created: list[dict]) -> dict[str, int]:
         dist: dict[str, int] = {}
         for row in created:
@@ -76,6 +83,7 @@ class WeeklyReport:
         pomodoro = self._fetch_pomodoro_summary(start, end)
         overdue = self._fetch_overdue(end)
         next_week = self._fetch_next_week(end)
+        this_week_plan = self._fetch_this_week_plan(start, end)
         total_completed = len(completed)
         total_created = len(created)
         completion_rate = (total_completed / total_created * 100) if total_created else 0.0
@@ -111,6 +119,26 @@ class WeeklyReport:
                 lines.append(f"- {row['title']} ({hours:.1f}h)")
             else:
                 lines.append(f"- {row['title']}")
+        lines.append("")
+
+        lines.append("## This Week Plan")
+        if this_week_plan:
+            for row in this_week_plan:
+                due_display = row.get("due_date") or ""
+                if row.get("due_time"):
+                    due_display = f"{due_display} {row['due_time'][:5]}" if due_display else row["due_time"][:5]
+                priority = row.get("priority", "none") or "none"
+                if priority == "urgent_important":
+                    pri_label = "🔴"
+                elif priority == "not_urgent_important":
+                    pri_label = "🟡"
+                elif priority == "urgent_not_important":
+                    pri_label = "🟠"
+                else:
+                    pri_label = "⚪"
+                lines.append(f"- [{pri_label}] {row['title']} (到期: {due_display})")
+        else:
+            lines.append("- (none)")
         lines.append("")
 
         lines.append("## Time Tracking")
@@ -154,6 +182,7 @@ class WeeklyReport:
         pomodoro = self._fetch_pomodoro_summary(start, end)
         overdue = self._fetch_overdue(end)
         next_week = self._fetch_next_week(end)
+        this_week_plan = self._fetch_this_week_plan(start, end)
         total_completed = len(completed)
         total_created = len(created)
         completion_rate = (total_completed / total_created * 100) if total_created else 0.0
@@ -186,6 +215,28 @@ class WeeklyReport:
             minutes = task_minutes.get(tid, 0) if tid is not None else 0
             time_str = f"{minutes / 60:.1f}h" if minutes > 0 else ""
             completed_table.add_row(row.get("project_name") or "No Project", row["title"], time_str)
+
+        plan_table = Table(title="This Week Plan", show_header=True)
+        plan_table.add_column("Due", style="cyan")
+        plan_table.add_column("Task Title")
+        plan_table.add_column("Priority")
+        if this_week_plan:
+            for row in this_week_plan:
+                due_display = row.get("due_date") or ""
+                if row.get("due_time"):
+                    due_display = f"{due_display} {row['due_time'][:5]}" if due_display else row["due_time"][:5]
+                priority = row.get("priority", "none") or "none"
+                if priority == "urgent_important":
+                    pri_label = "🔴"
+                elif priority == "not_urgent_important":
+                    pri_label = "🟡"
+                elif priority == "urgent_not_important":
+                    pri_label = "🟠"
+                else:
+                    pri_label = "⚪"
+                plan_table.add_row(due_display, row["title"], pri_label)
+        else:
+            plan_table.add_row("", "(no planned tasks)", "")
 
         time_table = Table(title="Time Tracking (Pomodoro)", show_header=True)
         time_table.add_column("Task")
@@ -230,7 +281,7 @@ class WeeklyReport:
 
         from rich.console import Group
 
-        elements: list[RenderableType] = [header, summary_table, completed_table, time_table, pri_table]
+        elements: list[RenderableType] = [header, summary_table, completed_table, plan_table, time_table, pri_table]
         if overdue_table is not None:
             elements.append(overdue_table)
         if next_table is not None:

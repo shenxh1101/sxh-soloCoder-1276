@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 
 
 def _now() -> str:
-    return datetime.now().isoformat()
+    return datetime.now().replace(microsecond=0).isoformat()
 
 
 def _row_to_project(row: sqlite3.Row) -> Project:
@@ -710,6 +710,16 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM reminders WHERE dismissed = 0 AND remind_at <= ?",
                 (now,),
+            ).fetchall()
+            return [_row_to_reminder(r) for r in rows]
+
+    def get_upcoming_reminders(self, days: int = 7) -> List[Reminder]:
+        now = _now()
+        future = (datetime.now() + timedelta(days=days)).replace(microsecond=0).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reminders WHERE dismissed = 0 AND remind_at >= ? AND remind_at <= ? ORDER BY remind_at",
+                (now, future),
             ).fetchall()
             return [_row_to_reminder(r) for r in rows]
 
