@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "taskflow"
+version = "1.0.0"
+description = "A full-featured terminal task and time management system"
+requires-python = ">=3.10"
+dependencies = [
+    "rich>=13.0",
+    "typer>=0.9",
+    "prompt_toolkit>=3.0",
+    "sqlite-utils>=3.35",
+    "dateparser>=1.1",
+    "rapidfuzz>=3.0",
+    "pyperclip>=1.8",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+notify = ["plyer>=2.1"]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
+[project.scripts]
+taskflow = "taskflow.cli:app"
+tf = "taskflow.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["taskflow*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
