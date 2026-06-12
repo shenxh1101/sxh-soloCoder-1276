@@ -175,7 +175,7 @@ def add(text: str) -> None:
     if result.due_date:
         table.add_row("Due Date", result.due_date.isoformat())
     if result.due_time:
-        table.add_row("Due Time", result.due_time.isoformat())
+        table.add_row("Due Time", result.due_time.isoformat()[:5])
     if result.tags:
         table.add_row("Tags", ", ".join(result.tags))
     console.print(table)
@@ -236,7 +236,7 @@ def list(
                 proj_name = proj.name
         due = task.due_date or ""
         if task.due_time:
-            due = f"{due} {task.due_time}" if due else task.due_time
+            due = f"{due} {task.due_time[:5]}" if due else task.due_time[:5]
         table.add_row(
             str(task.id) if task.id else "",
             task.title,
@@ -295,43 +295,8 @@ def report(week: Optional[str] = None) -> None:
             console.print(f"[red]Invalid week date: {week}. Use ISO format YYYY-MM-DD[/red]")
             raise typer.Exit(1)
 
-    start, end = _week_range(week_start)
-    stats = db.get_weekly_stats(start.isoformat(), end.isoformat())
-
-    header = Panel(
-        Text(f"Weekly Report: {start.isoformat()} ~ {end.isoformat()}", style="bold cyan", justify="center"),
-        style="cyan",
-    )
-    console.print(header)
-
-    summary_table = Table(title="Summary", show_header=True)
-    summary_table.add_column("Metric", style="bold")
-    summary_table.add_column("Value", justify="right")
-    summary_table.add_row("Tasks Created", str(stats.get("tasks_created", 0)))
-    summary_table.add_row("Tasks Completed", str(stats.get("tasks_completed", 0)))
-    completion_rate = 0.0
-    if stats.get("tasks_created", 0) > 0:
-        completion_rate = (stats.get("tasks_completed", 0) / stats.get("tasks_created", 0)) * 100
-    summary_table.add_row("Completion Rate", f"{completion_rate:.1f}%")
-    summary_table.add_row("Overdue Tasks", str(stats.get("overdue_tasks", 0)))
-    console.print(summary_table)
-
-    status_table = Table(title="Tasks by Status", show_header=True)
-    status_table.add_column("Status", style="bold")
-    status_table.add_column("Count", justify="right")
-    for s, count in stats.get("tasks_by_status", {}).items():
-        status_table.add_row(s, str(count))
-    console.print(status_table)
-
-    pomo = stats.get("pomodoro", {})
-    pomo_table = Table(title="Pomodoro Stats", show_header=True)
-    pomo_table.add_column("Metric", style="bold")
-    pomo_table.add_column("Value", justify="right")
-    pomo_table.add_row("Total Sessions", str(pomo.get("total_sessions", 0)))
-    pomo_table.add_row("Total Minutes", str(pomo.get("total_minutes", 0)))
-    pomo_table.add_row("Completed Sessions", str(pomo.get("completed_sessions", 0)))
-    pomo_table.add_row("Completed Minutes", str(pomo.get("completed_minutes", 0)))
-    console.print(pomo_table)
+    weekly_report = WeeklyReport(db)
+    console.print(weekly_report.format_as_rich(week_start))
 
 
 @app.command()
@@ -384,33 +349,47 @@ def pomodoro(
     db = Database(get_db_path())
     db.init_db()
 
-    valid_actions = ["start", "pause", "resume", "cancel", "stats"]
+    valid_actions = ["start", "pause", "resume", "cancel", "complete", "stats"]
     if action not in valid_actions:
         console.print(f"[red]Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}[/red]")
         raise typer.Exit(1)
 
     if action == "stats":
-        pomo_stats = PomodoroStats(db)
         start, end = _week_range()
-        week_stats = db.get_pomodoro_stats((start.isoformat(), end.isoformat()))
+        completed_sessions = db.query_all(
+            "SELECT p.*, t.title AS task_title FROM pomodoro_sessions p "
+            "JOIN tasks t ON p.task_id = t.id "
+            "WHERE p.completed = 1 AND p.started_at >= ? AND p.started_at <= ? "
+            "ORDER BY p.started_at",
+            (start.isoformat(), end.isoformat()),
+        )
+        total_sessions = len(completed_sessions)
+        total_minutes = sum(s.get("duration_minutes", 0) for s in completed_sessions)
 
         table = Table(title="Pomodoro Stats (This Week)", show_header=True)
         table.add_column("Metric", style="bold")
         table.add_column("Value", justify="right")
-        table.add_row("Total Sessions", str(week_stats.get("total_sessions", 0)))
-        table.add_row("Total Minutes", str(week_stats.get("total_minutes", 0)))
-        table.add_row("Completed Sessions", str(week_stats.get("completed_sessions", 0)))
-        table.add_row("Completed Minutes", str(week_stats.get("completed_minutes", 0)))
+        table.add_row("Completed Sessions", str(total_sessions))
+        table.add_row("Completed Minutes", str(total_minutes))
         console.print(table)
 
-        by_task = week_stats.get("by_task", {})
-        if by_task:
+        if completed_sessions:
+            by_task: dict[str, dict[str, int]] = {}
+            for s in completed_sessions:
+                tid = str(s["task_id"])
+                title = s.get("task_title", "Unknown")
+                key = f"{tid}: {title}"
+                if key not in by_task:
+                    by_task[key] = {"count": 0, "total_minutes": 0}
+                by_task[key]["count"] += 1
+                by_task[key]["total_minutes"] += s.get("duration_minutes", 0)
+
             task_table = Table(title="By Task", show_header=True)
-            task_table.add_column("Task ID", justify="right")
+            task_table.add_column("Task")
             task_table.add_column("Sessions", justify="right")
             task_table.add_column("Minutes", justify="right")
-            for tid, info in by_task.items():
-                task_table.add_row(str(tid), str(info.get("count", 0)), str(info.get("total_minutes", 0)))
+            for key, info in by_task.items():
+                task_table.add_row(key, str(info["count"]), str(info["total_minutes"]))
             console.print(task_table)
         return
 
@@ -450,7 +429,43 @@ def pomodoro(
         return
 
     if action == "cancel":
-        console.print("[red]Pomodoro cancelled[/red]")
+        pending = db.query_all(
+            "SELECT * FROM pomodoro_sessions WHERE completed = 0 ORDER BY started_at DESC LIMIT 1"
+        )
+        if not pending:
+            console.print("[yellow]No pending pomodoro session to cancel[/yellow]")
+            return
+        session_id = pending[0]["id"]
+        db.delete_pomodoro_session(session_id)
+        console.print(f"[red]Pomodoro session {session_id} cancelled[/red]")
+        return
+
+    if action == "complete":
+        if task_id is not None:
+            pending = db.query_all(
+                "SELECT * FROM pomodoro_sessions WHERE completed = 0 AND task_id = ? ORDER BY started_at DESC LIMIT 1",
+                (task_id,),
+            )
+        else:
+            pending = db.query_all(
+                "SELECT * FROM pomodoro_sessions WHERE completed = 0 ORDER BY started_at DESC LIMIT 1"
+            )
+        if not pending:
+            console.print("[yellow]No pending pomodoro session found[/yellow]")
+            return
+        from taskflow.db.models import PomodoroSession as DBPomodoroSession
+        row = pending[0]
+        session = DBPomodoroSession(
+            id=row["id"],
+            task_id=row["task_id"],
+            started_at=row["started_at"],
+            duration_minutes=row["duration_minutes"],
+            completed=True,
+        )
+        db.update_pomodoro_session(session)
+        task = db.get_task(session.task_id) if session.task_id else None
+        task_title = task.title if task else "(unknown)"
+        console.print(f"[green]Pomodoro session {session.id} marked as complete:[/green] {task_title}")
         return
 
 
@@ -539,11 +554,12 @@ def reminder_check() -> None:
     for reminder in reminders:
         task = db.get_task(reminder.task_id) if reminder.task_id else None
         task_title = task.title if task else "(unknown)"
+        remind_at_str = reminder.remind_at.replace("T", " ")[:16] if reminder.remind_at else ""
         table.add_row(
             str(reminder.id) if reminder.id else "",
             str(reminder.task_id),
             task_title,
-            reminder.remind_at or "",
+            remind_at_str,
         )
         reminder.dismissed = True
         db.update_reminder(reminder)

@@ -302,6 +302,66 @@ class Database:
         with self._connect() as conn:
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
+    def move_project(self, project_id: int, new_parent_id: Optional[int]) -> None:
+        project = self.get_project(project_id)
+        if project is None:
+            return
+        if new_parent_id == 0:
+            new_parent_id = None
+        if new_parent_id is not None:
+            current = self.get_project(new_parent_id)
+            while current is not None:
+                if current.id == project_id:
+                    return
+                current = self.get_project(current.parent_id) if current.parent_id else None
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE projects SET parent_id=?, updated_at=? WHERE id=?",
+                (new_parent_id, now, project_id),
+            )
+
+    def reorder_project(self, project_id: int, direction: str) -> None:
+        project = self.get_project(project_id)
+        if project is None:
+            return
+        parent_id = project.parent_id
+        with self._connect() as conn:
+            if parent_id is None:
+                siblings = conn.execute(
+                    "SELECT * FROM projects WHERE parent_id IS NULL ORDER BY sort_order"
+                ).fetchall()
+            else:
+                siblings = conn.execute(
+                    "SELECT * FROM projects WHERE parent_id = ? ORDER BY sort_order",
+                    (parent_id,),
+                ).fetchall()
+        ids = [r["id"] for r in siblings]
+        if project_id not in ids:
+            return
+        idx = ids.index(project_id)
+        if direction == "up":
+            if idx <= 0:
+                return
+            swap_idx = idx - 1
+        elif direction == "down":
+            if idx >= len(ids) - 1:
+                return
+            swap_idx = idx + 1
+        else:
+            return
+        swap_id = ids[swap_idx]
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE projects SET sort_order=?, updated_at=? WHERE id=?",
+                (idx, now, swap_id),
+            )
+            conn.execute(
+                "UPDATE projects SET sort_order=?, updated_at=? WHERE id=?",
+                (swap_idx, now, project_id),
+            )
+
     # ── Tasks ─────────────────────────────────────────────────
 
     def create_task(self, task: Task) -> int:

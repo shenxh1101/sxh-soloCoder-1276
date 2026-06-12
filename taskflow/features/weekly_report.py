@@ -39,9 +39,9 @@ class WeeklyReport:
 
     def _fetch_pomodoro_summary(self, start: date, end: date) -> list[dict]:
         return self.db.query_all(
-            "SELECT t.title, SUM(p.duration_minutes) AS total_minutes "
+            "SELECT t.id AS task_id, t.title, SUM(p.duration_minutes) AS total_minutes "
             "FROM pomodoro_sessions p JOIN tasks t ON p.task_id = t.id "
-            "WHERE p.started_at >= ? AND p.started_at <= ? "
+            "WHERE p.completed = 1 AND p.started_at >= ? AND p.started_at <= ? "
             "GROUP BY p.task_id ORDER BY total_minutes DESC",
             (start.isoformat(), end.isoformat()),
         )
@@ -81,6 +81,12 @@ class WeeklyReport:
         completion_rate = (total_completed / total_created * 100) if total_created else 0.0
         pri_dist = self._priority_distribution(created)
 
+        task_minutes: dict[int, int] = {}
+        for p in pomodoro:
+            tid = p.get("task_id")
+            if tid is not None:
+                task_minutes[tid] = p.get("total_minutes", 0) or 0
+
         lines: list[str] = []
         lines.append(f"# Weekly Report: {start.isoformat()} ~ {end.isoformat()}")
         lines.append("")
@@ -98,7 +104,13 @@ class WeeklyReport:
             if proj != current_project:
                 lines.append(f"### {proj}")
                 current_project = proj
-            lines.append(f"- {row['title']}")
+            tid = row.get("id")
+            minutes = task_minutes.get(tid, 0) if tid is not None else 0
+            if minutes > 0:
+                hours = minutes / 60
+                lines.append(f"- {row['title']} ({hours:.1f}h)")
+            else:
+                lines.append(f"- {row['title']}")
         lines.append("")
 
         lines.append("## Time Tracking")
@@ -118,13 +130,19 @@ class WeeklyReport:
         if overdue:
             lines.append("## Overdue Tasks")
             for row in overdue:
-                lines.append(f"- {row['title']} (due: {row['due_date']})")
+                due_display = row.get("due_date") or ""
+                if row.get("due_time"):
+                    due_display = f"{due_display} {row['due_time'][:5]}" if due_display else row["due_time"][:5]
+                lines.append(f"- {row['title']} (due: {due_display})")
             lines.append("")
 
         if next_week:
             lines.append("## Next Week Plan")
             for row in next_week:
-                lines.append(f"- {row['title']} (due: {row['due_date']})")
+                due_display = row.get("due_date") or ""
+                if row.get("due_time"):
+                    due_display = f"{due_display} {row['due_time'][:5]}" if due_display else row["due_time"][:5]
+                lines.append(f"- {row['title']} (due: {due_display})")
             lines.append("")
 
         return "\n".join(lines)
@@ -141,6 +159,12 @@ class WeeklyReport:
         completion_rate = (total_completed / total_created * 100) if total_created else 0.0
         pri_dist = self._priority_distribution(created)
 
+        task_minutes: dict[int, int] = {}
+        for p in pomodoro:
+            tid = p.get("task_id")
+            if tid is not None:
+                task_minutes[tid] = p.get("total_minutes", 0) or 0
+
         header = Panel(
             Text(f"Weekly Report: {start.isoformat()} ~ {end.isoformat()}", style="bold cyan", justify="center"),
             style="cyan",
@@ -156,8 +180,12 @@ class WeeklyReport:
         completed_table = Table(title="Completed Tasks", show_header=True)
         completed_table.add_column("Project", style="magenta")
         completed_table.add_column("Task")
+        completed_table.add_column("Time", justify="right", style="green")
         for row in completed:
-            completed_table.add_row(row.get("project_name") or "No Project", row["title"])
+            tid = row.get("id")
+            minutes = task_minutes.get(tid, 0) if tid is not None else 0
+            time_str = f"{minutes / 60:.1f}h" if minutes > 0 else ""
+            completed_table.add_row(row.get("project_name") or "No Project", row["title"], time_str)
 
         time_table = Table(title="Time Tracking (Pomodoro)", show_header=True)
         time_table.add_column("Task")
@@ -181,7 +209,10 @@ class WeeklyReport:
             overdue_table.add_column("Task", style="red")
             overdue_table.add_column("Due Date", style="red")
             for row in overdue:
-                overdue_table.add_row(row["title"], str(row["due_date"]))
+                due_display = row.get("due_date") or ""
+                if row.get("due_time"):
+                    due_display = f"{due_display} {row['due_time'][:5]}" if due_display else row["due_time"][:5]
+                overdue_table.add_row(row["title"], due_display)
 
         next_table = None
         if next_week:
@@ -189,7 +220,10 @@ class WeeklyReport:
             next_table.add_column("Task", style="blue")
             next_table.add_column("Due Date")
             for row in next_week:
-                next_table.add_row(row["title"], str(row["due_date"]))
+                due_display = row.get("due_date") or ""
+                if row.get("due_time"):
+                    due_display = f"{due_display} {row['due_time'][:5]}" if due_display else row["due_time"][:5]
+                next_table.add_row(row["title"], due_display)
 
         md_content = self.generate(week_start)
         markdown_panel = Panel(Markdown(md_content), title="Full Report", border_style="dim")

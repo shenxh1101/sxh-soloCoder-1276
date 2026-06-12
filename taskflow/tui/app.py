@@ -209,8 +209,13 @@ def render_task_kanban_view(state: AppState) -> Panel:
                 txt.append(f"[{task.id}] ", style=state.theme.muted)
                 txt.append(f"{_priority_label(task.priority)} ", style=pri_color)
                 txt.append(task.title, style=f"reverse {state.theme.highlight}" if is_selected else "")
+                due_parts = []
                 if task.due_date:
-                    txt.append(f"  📅 {task.due_date}", style=state.theme.warning)
+                    due_parts.append(task.due_date)
+                if task.due_time:
+                    due_parts.append(task.due_time[:5])
+                if due_parts:
+                    txt.append(f"  📅 {' '.join(due_parts)}", style=state.theme.warning)
                 col_table.add_row(Panel(txt, border_style=state.theme.muted, padding=(0, 1)))
 
         rows.append((col_title, col_table))
@@ -306,7 +311,13 @@ def render_detail_panel(state: AppState) -> Panel:
                  "  n — add note\n"
                  "  [ / ] — calendar week\n"
                  "  Space — toggle project collapse\n"
-                 "  q — quit",
+                 "  q — quit\n\n"
+                 "Project commands:\n"
+                 "  p add [name] — add project (child of selected if any)\n"
+                 "  p rename [name] — rename selected project\n"
+                 "  p move <id> — move selected project (0/root for root)\n"
+                 "  p delete — delete selected project\n"
+                 "  p up / p down — reorder selected project",
                  style=state.theme.muted),
             title="[bold]Task Detail[/bold]",
             border_style=state.theme.panel_border,
@@ -581,6 +592,103 @@ def delete_selected_task(state: AppState) -> None:
     refresh_data(state)
 
 
+def add_project_interactive(state: AppState, name: Optional[str] = None) -> None:
+    if not name:
+        try:
+            session: PromptSession = PromptSession()
+            name = session.prompt("Project name: ")
+            if not name.strip():
+                state.status_message = "Cancelled."
+                return
+        except (EOFError, KeyboardInterrupt):
+            state.status_message = "Cancelled."
+            return
+
+    parent_id = state.selected_project_id
+    sort_order = 0
+    siblings = state.db.list_projects(parent_id)
+    if siblings:
+        sort_order = max(p.sort_order for p in siblings) + 1
+
+    project = Project(name=name.strip(), parent_id=parent_id, sort_order=sort_order)
+    new_id = state.db.create_project(project)
+    state.selected_project_id = new_id
+    state.status_message = f"Created project #{new_id}: {name.strip()}"
+    refresh_data(state)
+
+
+def rename_project_interactive(state: AppState, new_name: Optional[str] = None) -> None:
+    if state.selected_project_id is None:
+        state.status_message = "No project selected."
+        return
+    if not new_name:
+        try:
+            session: PromptSession = PromptSession()
+            new_name = session.prompt("New project name: ")
+            if not new_name.strip():
+                state.status_message = "Cancelled."
+                return
+        except (EOFError, KeyboardInterrupt):
+            state.status_message = "Cancelled."
+            return
+
+    project = state.db.get_project(state.selected_project_id)
+    if project is None:
+        state.status_message = "Project not found."
+        return
+    project.name = new_name.strip()
+    state.db.update_project(project)
+    state.status_message = f"Renamed project to: {new_name.strip()}"
+    refresh_data(state)
+
+
+def move_project_interactive(state: AppState, target_id_str: str) -> None:
+    if state.selected_project_id is None:
+        state.status_message = "No project selected."
+        return
+    target_id_str = target_id_str.strip().lower()
+    if target_id_str in ("0", "root"):
+        target_id: Optional[int] = None
+        target_label = "root"
+    else:
+        try:
+            target_id = int(target_id_str)
+            target_project = state.db.get_project(target_id)
+            if target_project is None:
+                state.status_message = f"Target project #{target_id} not found."
+                return
+            target_label = target_project.name
+        except ValueError:
+            state.status_message = f"Invalid target project id: '{target_id_str}'"
+            return
+
+    state.db.move_project(state.selected_project_id, target_id)
+    state.status_message = f"Moved project under: {target_label}"
+    refresh_data(state)
+
+
+def delete_selected_project(state: AppState) -> None:
+    if state.selected_project_id is None:
+        state.status_message = "No project selected."
+        return
+    pid = state.selected_project_id
+    project = state.db.get_project(pid)
+    name = project.name if project else f"#{pid}"
+    state.db.delete_project(pid)
+    state.selected_project_id = None
+    state.status_message = f"Deleted project: {name}"
+    refresh_data(state)
+
+
+def reorder_selected_project(state: AppState, direction: str) -> None:
+    if state.selected_project_id is None:
+        state.status_message = "No project selected."
+        return
+    state.db.reorder_project(state.selected_project_id, direction)
+    state.status_message = f"Moved project {direction}."
+    refresh_data(state)
+
+
 def render_layout(state: AppState) -> Layout:
     layout = Layout()
     layout.split_column(
@@ -635,7 +743,7 @@ def run() -> None:
             if cmd in ("q", "quit", "exit"):
                 running = False
             elif cmd in ("?", "help"):
-                state.status_message = "Commands: q=quit, a=add, c=complete, d=delete, n=note, /=search, esc=clear search, 1/2/3=views, [/]=calendar, space=collapse"
+                state.status_message = "Commands: q=quit, a=add task, c=complete, d=delete task, n=note, /=search, p add/rename/move/delete/up/down=projects, 1/2/3=views, [/]=calendar, space=collapse"
             elif cmd == "a":
                 add_task_interactive(state, console)
             elif cmd == "c":
@@ -693,6 +801,31 @@ def run() -> None:
                         state.status_message = f"Selected task #{tid}"
                 except (ValueError, IndexError):
                     state.status_message = "Invalid select command. Use: select <task_id>"
+            elif cmd.startswith("p "):
+                parts = cmd[2:].strip()
+                if not parts:
+                    state.status_message = "Project commands: p add/rename/move/delete/up/down"
+                else:
+                    subparts = parts.split(None, 1)
+                    subcmd = subparts[0]
+                    arg = subparts[1] if len(subparts) > 1 else None
+                    if subcmd == "add":
+                        add_project_interactive(state, arg)
+                    elif subcmd == "rename":
+                        rename_project_interactive(state, arg)
+                    elif subcmd == "move":
+                        if arg:
+                            move_project_interactive(state, arg)
+                        else:
+                            state.status_message = "Usage: p move <target_project_id> (or 0/root)"
+                    elif subcmd == "delete":
+                        delete_selected_project(state)
+                    elif subcmd == "up":
+                        reorder_selected_project(state, "up")
+                    elif subcmd == "down":
+                        reorder_selected_project(state, "down")
+                    else:
+                        state.status_message = f"Unknown project command: '{subcmd}'. Use: p add/rename/move/delete/up/down"
             elif cmd == "":
                 pass
             else:

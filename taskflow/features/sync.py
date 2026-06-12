@@ -20,7 +20,6 @@ class GitSync:
     def __init__(self, db_path: Path, repo_path: Path) -> None:
         self.db_path = db_path
         self.repo_path = repo_path
-        self.repo_path.mkdir(parents=True, exist_ok=True)
 
     def _run_git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -32,6 +31,9 @@ class GitSync:
         )
 
     def init_repo(self, repo_url: str) -> None:
+        if not repo_url:
+            return
+        self.repo_path.mkdir(parents=True, exist_ok=True)
         if (self.repo_path / ".git").exists():
             self._run_git("remote", "set-url", "origin", repo_url, check=False)
             return
@@ -132,14 +134,30 @@ class SyncManager:
     def is_configured(self) -> bool:
         return self.config.sync_method != "none" and self.config.sync_url != ""
 
+    @property
+    def validation_error(self) -> str | None:
+        if self.config.sync_method == "none":
+            return None
+        if self.config.sync_method in ("git", "webdav") and not self.config.sync_url:
+            return "同步地址未配置，请使用 config-set sync_url <地址>"
+        return None
+
     def _init_backend(self) -> None:
         method = self.config.sync_method
         url = self.config.sync_url
         if method == "git":
+            if not url:
+                logger.warning("sync method is git but sync_url is empty, backend disabled")
+                self._sync_backend = None
+                return
             repo_path = SYNC_DIR / "git"
             self._sync_backend = GitSync(self.db_path, repo_path)
             self._sync_backend.init_repo(url)
         elif method == "webdav":
+            if not url:
+                logger.warning("sync method is webdav but sync_url is empty, backend disabled")
+                self._sync_backend = None
+                return
             self._sync_backend = WebDAVSync(self.db_path, url)
 
     @property
